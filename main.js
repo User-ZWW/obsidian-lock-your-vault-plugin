@@ -164,12 +164,59 @@ var LiquidLockPlugin = class extends import_obsidian.Plugin {
         this.lock();
       }
     });
+    this.addCommand({
+      id: "debug-media-state",
+      name: "Debug Media State (Check Console)",
+      callback: () => {
+        console.log("--- Liquid Lock Debug Media ---");
+        if ("mediaSession" in navigator) {
+          console.log("MediaSession State:", navigator.mediaSession.playbackState);
+        } else {
+          console.log("MediaSession API not supported");
+        }
+        console.log("Checking Workspace Leaves:");
+        this.app.workspace.iterateAllLeaves((leaf) => {
+          const viewType = leaf.view.getViewType();
+          console.log(`- Leaf View Type: ${viewType}`);
+          if (viewType.includes("media") || viewType.includes("video") || viewType.includes("bilibili")) {
+            console.log(`  - Potential Media Leaf found: ${viewType}`);
+            const container = leaf.view.contentEl;
+            const vids = container.querySelectorAll("video");
+            const ifrs = container.querySelectorAll("iframe");
+            const webviews2 = container.querySelectorAll("webview");
+            console.log(`  - Content: ${vids.length} videos, ${ifrs.length} iframes, ${webviews2.length} webviews`);
+          }
+        });
+        const playingClasses = [".plyr--playing", ".is-playing", ".media-playing", ".active-media"];
+        playingClasses.forEach((cls) => {
+          const el = document.querySelector(cls);
+          if (el)
+            console.log(`Class '${cls}' FOUND.`, el);
+        });
+        const videos = document.querySelectorAll("video");
+        const iframes = document.querySelectorAll("iframe");
+        const webviews = document.querySelectorAll("webview");
+        console.log(`Global Search: ${videos.length} videos, ${iframes.length} iframes, ${webviews.length} webviews.`);
+        console.log("isMediaPlaying() returns:", this.isMediaPlaying());
+        console.log("--- End Debug ---");
+      }
+    });
     console.log("Liquid Lock Plugin loaded");
   }
   checkIdleInterval() {
-    this.registerInterval(window.setInterval(() => {
+    this.registerInterval(window.setInterval(async () => {
       if (this.lockScreen.isLockedState())
         return;
+      if (this.isMediaPlaying()) {
+        console.log("Liquid Lock: DOM Media playing detected.");
+        this.resetIdleTimer();
+        return;
+      }
+      if (await this.checkWebviews()) {
+        console.log("Liquid Lock: Webview Media playing detected.");
+        this.resetIdleTimer();
+        return;
+      }
       const timeSinceLastActivity = Date.now() - this.lastActivityTime;
       const timeoutMs = this.settings.timeoutMinutes * 60 * 1e3;
       if (timeSinceLastActivity > timeoutMs) {
@@ -179,6 +226,68 @@ var LiquidLockPlugin = class extends import_obsidian.Plugin {
   }
   resetIdleTimer() {
     this.lastActivityTime = Date.now();
+  }
+  async checkWebviews() {
+    const webviews = document.querySelectorAll("webview");
+    for (let i = 0; i < webviews.length; i++) {
+      const wv = webviews[i];
+      try {
+        const isPlaying = await wv.executeJavaScript(`
+                    (function() {
+                        const media = document.querySelectorAll('video, audio');
+                        for(let i=0; i<media.length; i++) {
+                            if(!media[i].paused && !media[i].ended) return true;
+                        }
+                        return false;
+                    })()
+                `);
+        if (isPlaying)
+          return true;
+      } catch (e) {
+      }
+    }
+    return false;
+  }
+  isMediaPlaying() {
+    if ("mediaSession" in navigator && navigator.mediaSession.playbackState === "playing") {
+      return true;
+    }
+    const playingClasses = [".plyr--playing", ".is-playing", ".media-playing", ".active-media"];
+    if (document.querySelector(playingClasses.join(","))) {
+      return true;
+    }
+    const scanForMedia = (root) => {
+      try {
+        const mediaElements = root.querySelectorAll("video, audio");
+        for (let i = 0; i < mediaElements.length; i++) {
+          const media = mediaElements[i];
+          if (!media.paused && !media.ended) {
+            return true;
+          }
+        }
+        const allElements = root.querySelectorAll("*");
+        for (let i = 0; i < allElements.length; i++) {
+          const el = allElements[i];
+          if (el.shadowRoot) {
+            if (scanForMedia(el.shadowRoot))
+              return true;
+          }
+        }
+        const iframes = root.querySelectorAll("iframe");
+        for (let i = 0; i < iframes.length; i++) {
+          try {
+            const doc = iframes[i].contentDocument;
+            if (doc && scanForMedia(doc))
+              return true;
+          } catch (e) {
+          }
+        }
+      } catch (err) {
+        console.error("Liquid Lock: Error scanning media", err);
+      }
+      return false;
+    };
+    return scanForMedia(document);
   }
   lock() {
     if (!this.lockScreen.isLockedState()) {
