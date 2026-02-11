@@ -43,6 +43,8 @@ Obsidian 的液态玻璃拟态锁屏插件。
 4.  **手动解锁**: 点击屏幕上的数字键盘或直接使用键盘输入 PIN 码。
     - `Backspace` / `Delete`: 删除一位。
     - 输入满 4 位自动验证。
+## 效果图
+<img width="1920" height="1046" alt="image" src="https://github.com/user-attachments/assets/4a55fc49-6c6b-4cae-a2db-3d8625ab12a9" />
 
 ## 🤝 贡献 (Contributing)
 
