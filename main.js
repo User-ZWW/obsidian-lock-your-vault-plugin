@@ -197,8 +197,34 @@ var LiquidLockPlugin = class extends import_obsidian.Plugin {
         const iframes = document.querySelectorAll("iframe");
         const webviews = document.querySelectorAll("webview");
         console.log(`Global Search: ${videos.length} videos, ${iframes.length} iframes, ${webviews.length} webviews.`);
-        console.log("isMediaPlaying() returns:", this.isMediaPlaying());
-        console.log("--- End Debug ---");
+        try {
+          const electron = window.require ? window.require("electron") : require("electron");
+          if (electron) {
+            console.log("Electron module: FOUND");
+            if (electron.remote) {
+              console.log("Electron remote: FOUND");
+              const currentWC = electron.remote.getCurrentWebContents();
+              const isAudible = typeof currentWC.isCurrentlyAudible === "function" ? currentWC.isCurrentlyAudible() : currentWC.isCurrentlyAudible;
+              console.log(`Current WebContents ID: ${currentWC.id}, Audible (Value): ${isAudible}`);
+              const allWC = electron.remote.webContents.getAllWebContents();
+              console.log(`Total WebContents: ${allWC.length}`);
+              allWC.forEach((wc) => {
+                const audibleState = typeof wc.isCurrentlyAudible === "function" ? wc.isCurrentlyAudible() : wc.isCurrentlyAudible;
+                console.log(`- WC ID: ${wc.id}, Type: ${wc.getType()}, Title: '${wc.getTitle()}', Audible: ${audibleState}, Destroyed: ${wc.isDestroyed()}`);
+              });
+            } else {
+              console.log("Electron remote: NOT FOUND (Check @electron/remote?)");
+            }
+          } else {
+            console.log("Electron module: NOT FOUND");
+          }
+        } catch (e) {
+          console.error("Electron Debug Failed:", e);
+        }
+        this.checkAllMediaSources().then((result) => {
+          console.log("checkAllMediaSources() async returns:", result);
+          console.log("--- End Debug ---");
+        });
       }
     });
     console.log("Liquid Lock Plugin loaded");
@@ -207,13 +233,9 @@ var LiquidLockPlugin = class extends import_obsidian.Plugin {
     this.registerInterval(window.setInterval(async () => {
       if (this.lockScreen.isLockedState())
         return;
-      if (this.isMediaPlaying()) {
-        console.log("Liquid Lock: DOM Media playing detected.");
-        this.resetIdleTimer();
-        return;
-      }
-      if (await this.checkWebviews()) {
-        console.log("Liquid Lock: Webview Media playing detected.");
+      const isPlaying = await this.checkAllMediaSources();
+      if (isPlaying) {
+        console.log("Liquid Lock: Media playing detected.");
         this.resetIdleTimer();
         return;
       }
@@ -227,67 +249,110 @@ var LiquidLockPlugin = class extends import_obsidian.Plugin {
   resetIdleTimer() {
     this.lastActivityTime = Date.now();
   }
-  async checkWebviews() {
-    const webviews = document.querySelectorAll("webview");
-    for (let i = 0; i < webviews.length; i++) {
-      const wv = webviews[i];
-      try {
-        const isPlaying = await wv.executeJavaScript(`
-                    (function() {
-                        const media = document.querySelectorAll('video, audio');
-                        for(let i=0; i<media.length; i++) {
-                            if(!media[i].paused && !media[i].ended) return true;
-                        }
-                        return false;
-                    })()
-                `);
-        if (isPlaying)
-          return true;
-      } catch (e) {
-      }
-    }
-    return false;
-  }
-  isMediaPlaying() {
+  // Unified Async Media Check
+  async checkAllMediaSources() {
     if ("mediaSession" in navigator && navigator.mediaSession.playbackState === "playing") {
+      return true;
+    }
+    if (this.checkElectronAudio()) {
       return true;
     }
     const playingClasses = [".plyr--playing", ".is-playing", ".media-playing", ".active-media"];
     if (document.querySelector(playingClasses.join(","))) {
       return true;
     }
-    const scanForMedia = (root) => {
-      try {
-        const mediaElements = root.querySelectorAll("video, audio");
-        for (let i = 0; i < mediaElements.length; i++) {
-          const media = mediaElements[i];
-          if (!media.paused && !media.ended) {
+    return await this.scanRootRecursively(document);
+  }
+  checkElectronAudio() {
+    try {
+      const electron = window.require ? window.require("electron") : null;
+      if (electron && electron.remote) {
+        const allWebContents = electron.remote.webContents.getAllWebContents();
+        for (const wc of allWebContents) {
+          if (wc.isDestroyed())
+            continue;
+          const audible = typeof wc.isCurrentlyAudible === "function" ? wc.isCurrentlyAudible() : wc.isCurrentlyAudible;
+          if (audible) {
             return true;
           }
         }
-        const allElements = root.querySelectorAll("*");
-        for (let i = 0; i < allElements.length; i++) {
-          const el = allElements[i];
-          if (el.shadowRoot) {
-            if (scanForMedia(el.shadowRoot))
-              return true;
-          }
-        }
-        const iframes = root.querySelectorAll("iframe");
-        for (let i = 0; i < iframes.length; i++) {
+      }
+    } catch (e) {
+    }
+    return false;
+  }
+  async scanRootRecursively(root) {
+    try {
+      const mediaElements = root.querySelectorAll("video, audio");
+      for (let i = 0; i < mediaElements.length; i++) {
+        const media = mediaElements[i];
+        if (!media.paused && !media.ended)
+          return true;
+      }
+      try {
+        const webviews = root.querySelectorAll("webview");
+        for (let i = 0; i < webviews.length; i++) {
+          const wv = webviews[i];
           try {
-            const doc = iframes[i].contentDocument;
-            if (doc && scanForMedia(doc))
+            const isPlaying = await wv.executeJavaScript(`
+                            (function() {
+                                const scan = (node) => {
+                                    // Direct Media
+                                    const media = node.querySelectorAll('video, audio');
+                                    for(let i=0; i<media.length; i++) {
+                                        if(!media[i].paused && !media[i].ended) return true;
+                                    }
+                                    // Shadow Roots
+                                    const all = node.querySelectorAll('*');
+                                    for(let i=0; i<all.length; i++) {
+                                        if(all[i].shadowRoot && scan(all[i].shadowRoot)) return true;
+                                    }
+                                    // Iframes (Same-Origin only inside webview)
+                                    const iframes = node.querySelectorAll('iframe');
+                                    for(let i=0; i<iframes.length; i++) {
+                                        try {
+                                            if(iframes[i].contentDocument && scan(iframes[i].contentDocument)) return true;
+                                        } catch(e){}
+                                    }
+                                    return false;
+                                };
+                                return scan(document);
+                            })()
+                        `);
+            if (isPlaying)
               return true;
           } catch (e) {
           }
         }
-      } catch (err) {
-        console.error("Liquid Lock: Error scanning media", err);
+      } catch (e) {
       }
-      return false;
-    };
-    return scanForMedia(document);
+      const allElements = root.querySelectorAll("*");
+      for (let i = 0; i < allElements.length; i++) {
+        const el = allElements[i];
+        if (el.shadowRoot) {
+          if (await this.scanRootRecursively(el.shadowRoot))
+            return true;
+        }
+      }
+      const iframes = root.querySelectorAll("iframe");
+      for (let i = 0; i < iframes.length; i++) {
+        try {
+          const doc = iframes[i].contentDocument;
+          if (doc) {
+            if (await this.scanRootRecursively(doc))
+              return true;
+          }
+        } catch (e) {
+        }
+      }
+    } catch (err) {
+      console.error("Liquid Lock: Error scanning source", err);
+    }
+    return false;
+  }
+  // Legacy/Sync check kept for compatibility if needed, but primary logic is now in checkAllMediaSources
+  isMediaPlaying() {
+    return document.querySelectorAll("video, audio").length > 0;
   }
   lock() {
     if (!this.lockScreen.isLockedState()) {

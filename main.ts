@@ -107,8 +107,38 @@ export default class LiquidLockPlugin extends Plugin {
 
                 console.log(`Global Search: ${videos.length} videos, ${iframes.length} iframes, ${webviews.length} webviews.`);
 
-                console.log("isMediaPlaying() returns:", this.isMediaPlaying());
-                console.log("--- End Debug ---");
+                // Debug Electron State
+                try {
+                    // @ts-ignore
+                    const electron = window.require ? window.require('electron') : require('electron');
+                    if (electron) {
+                        console.log("Electron module: FOUND");
+                        if (electron.remote) {
+                            console.log("Electron remote: FOUND");
+                            const currentWC = electron.remote.getCurrentWebContents();
+                            const isAudible = typeof currentWC.isCurrentlyAudible === 'function' ? currentWC.isCurrentlyAudible() : currentWC.isCurrentlyAudible;
+                            console.log(`Current WebContents ID: ${currentWC.id}, Audible (Value): ${isAudible}`);
+
+                            const allWC = electron.remote.webContents.getAllWebContents();
+                            console.log(`Total WebContents: ${allWC.length}`);
+                            allWC.forEach((wc: any) => {
+                                const audibleState = typeof wc.isCurrentlyAudible === 'function' ? wc.isCurrentlyAudible() : wc.isCurrentlyAudible;
+                                console.log(`- WC ID: ${wc.id}, Type: ${wc.getType()}, Title: '${wc.getTitle()}', Audible: ${audibleState}, Destroyed: ${wc.isDestroyed()}`);
+                            });
+                        } else {
+                            console.log("Electron remote: NOT FOUND (Check @electron/remote?)");
+                        }
+                    } else {
+                        console.log("Electron module: NOT FOUND");
+                    }
+                } catch (e) {
+                    console.error("Electron Debug Failed:", e);
+                }
+
+                this.checkAllMediaSources().then(result => {
+                    console.log("checkAllMediaSources() async returns:", result);
+                    console.log("--- End Debug ---");
+                });
             }
         });
 
@@ -120,16 +150,11 @@ export default class LiquidLockPlugin extends Plugin {
         this.registerInterval(window.setInterval(async () => {
             if (this.lockScreen.isLockedState()) return;
 
-            // 1. Check Standard DOM & Shadow DOM (Synchronous)
-            if (this.isMediaPlaying()) {
-                console.log("Liquid Lock: DOM Media playing detected.");
-                this.resetIdleTimer();
-                return;
-            }
+            // Perform comprehensive async media check
+            const isPlaying = await this.checkAllMediaSources();
 
-            // 2. Check Webviews (Asynchronous) - for plugins like Media Extended embedding Bilibili
-            if (await this.checkWebviews()) {
-                console.log("Liquid Lock: Webview Media playing detected.");
+            if (isPlaying) {
+                console.log("Liquid Lock: Media playing detected.");
                 this.resetIdleTimer();
                 return;
             }
@@ -147,78 +172,127 @@ export default class LiquidLockPlugin extends Plugin {
         this.lastActivityTime = Date.now();
     }
 
-    async checkWebviews(): Promise<boolean> {
-        const webviews = document.querySelectorAll('webview');
-        for (let i = 0; i < webviews.length; i++) {
-            const wv = webviews[i] as any;
-            try {
-                // Inject script to check for playing media inside the webview's process
-                const isPlaying = await wv.executeJavaScript(`
-                    (function() {
-                        const media = document.querySelectorAll('video, audio');
-                        for(let i=0; i<media.length; i++) {
-                            if(!media[i].paused && !media[i].ended) return true;
-                        }
-                        return false;
-                    })()
-                `);
-                if (isPlaying) return true;
-            } catch (e) {
-                // Ignore errors (e.g., content not loaded, security restrictions)
-            }
-        }
-        return false;
-    }
-
-    isMediaPlaying(): boolean {
-        // Method 1: Check Global Media Session
+    // Unified Async Media Check
+    async checkAllMediaSources(): Promise<boolean> {
+        // 1. Check Global Media Session
         if ('mediaSession' in navigator && navigator.mediaSession.playbackState === 'playing') {
             return true;
         }
 
-        // Method 2: Check for common "playing" classes
+        // 2. Check Electron Audio State (The "Nuclear" Option for Cross-Origin/Webviews)
+        if (this.checkElectronAudio()) {
+            return true;
+        }
+
+        // 3. Check for common "playing" classes (DOM check)
         const playingClasses = ['.plyr--playing', '.is-playing', '.media-playing', '.active-media'];
         if (document.querySelector(playingClasses.join(','))) {
             return true;
         }
 
-        const scanForMedia = (root: Document | ShadowRoot | HTMLElement): boolean => {
-            try {
-                // Check direct Video/Audio elements
-                const mediaElements = root.querySelectorAll('video, audio');
-                for (let i = 0; i < mediaElements.length; i++) {
-                    const media = mediaElements[i] as HTMLMediaElement;
-                    if (!media.paused && !media.ended) {
+        // 4. Recursive Scan for Video/Audio/Iframe/Webview
+        return await this.scanRootRecursively(document);
+    }
+
+    checkElectronAudio(): boolean {
+        try {
+            // Attempt to access Electron remote to check all webContents
+            // @ts-ignore
+            const electron = window.require ? window.require('electron') : null;
+            if (electron && electron.remote) {
+                const allWebContents = electron.remote.webContents.getAllWebContents();
+                for (const wc of allWebContents) {
+                    if (wc.isDestroyed()) continue;
+
+                    const audible = typeof wc.isCurrentlyAudible === 'function' ? wc.isCurrentlyAudible() : wc.isCurrentlyAudible;
+                    if (audible) {
                         return true;
                     }
                 }
-
-                // Recursive check for Shadow Roots
-                const allElements = root.querySelectorAll('*');
-                for (let i = 0; i < allElements.length; i++) {
-                    const el = allElements[i];
-                    if (el.shadowRoot) {
-                        if (scanForMedia(el.shadowRoot)) return true;
-                    }
-                }
-
-                // Check iframes (only same-origin)
-                const iframes = root.querySelectorAll('iframe');
-                for (let i = 0; i < iframes.length; i++) {
-                    try {
-                        const doc = iframes[i].contentDocument;
-                        if (doc && scanForMedia(doc)) return true;
-                    } catch (e) {
-                        // access denied
-                    }
-                }
-            } catch (err) {
-                console.error("Liquid Lock: Error scanning media", err);
             }
-            return false;
+        } catch (e) {
+            // Electron access failed or not available
         }
+        return false;
+    }
 
-        return scanForMedia(document);
+    async scanRootRecursively(root: Document | ShadowRoot | HTMLElement): Promise<boolean> {
+        try {
+            // A. Direct Video/Audio elements
+            const mediaElements = root.querySelectorAll('video, audio');
+            for (let i = 0; i < mediaElements.length; i++) {
+                const media = mediaElements[i] as HTMLMediaElement;
+                if (!media.paused && !media.ended) return true;
+            }
+
+            // B. Direct Webview elements (Electron/Obsidian specific)
+            try {
+                const webviews = root.querySelectorAll('webview');
+                for (let i = 0; i < webviews.length; i++) {
+                    const wv = webviews[i] as any;
+                    try {
+                        // Inject RECURSIVE script to check for playing media inside the webview
+                        // We serialize the scanner function to run it inside the isolated webview context
+                        const isPlaying = await wv.executeJavaScript(`
+                            (function() {
+                                const scan = (node) => {
+                                    // Direct Media
+                                    const media = node.querySelectorAll('video, audio');
+                                    for(let i=0; i<media.length; i++) {
+                                        if(!media[i].paused && !media[i].ended) return true;
+                                    }
+                                    // Shadow Roots
+                                    const all = node.querySelectorAll('*');
+                                    for(let i=0; i<all.length; i++) {
+                                        if(all[i].shadowRoot && scan(all[i].shadowRoot)) return true;
+                                    }
+                                    // Iframes (Same-Origin only inside webview)
+                                    const iframes = node.querySelectorAll('iframe');
+                                    for(let i=0; i<iframes.length; i++) {
+                                        try {
+                                            if(iframes[i].contentDocument && scan(iframes[i].contentDocument)) return true;
+                                        } catch(e){}
+                                    }
+                                    return false;
+                                };
+                                return scan(document);
+                            })()
+                        `);
+                        if (isPlaying) return true;
+                    } catch (e) { /* Ignore webview access errors */ }
+                }
+            } catch (e) { /* Ignore if webview query fails */ }
+
+            // C. Recursion: Shadow Roots
+            const allElements = root.querySelectorAll('*');
+            for (let i = 0; i < allElements.length; i++) {
+                const el = allElements[i];
+                if (el.shadowRoot) {
+                    if (await this.scanRootRecursively(el.shadowRoot)) return true;
+                }
+            }
+
+            // D. Recursion: Iframes (Same-Origin)
+            const iframes = root.querySelectorAll('iframe');
+            for (let i = 0; i < iframes.length; i++) {
+                try {
+                    const doc = iframes[i].contentDocument;
+                    if (doc) {
+                        if (await this.scanRootRecursively(doc)) return true;
+                    }
+                } catch (e) { /* Cross-origin iframe */ }
+            }
+
+        } catch (err) {
+            console.error("Liquid Lock: Error scanning source", err);
+        }
+        return false;
+    }
+
+    // Legacy/Sync check kept for compatibility if needed, but primary logic is now in checkAllMediaSources
+    isMediaPlaying(): boolean {
+        // Simple synchronous check as fallback or for debug command
+        return document.querySelectorAll('video, audio').length > 0;
     }
 
     lock() {

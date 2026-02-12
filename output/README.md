@@ -14,9 +14,13 @@ Obsidian 的液态玻璃拟态锁屏插件。
     - 自定义 PIN 码。
     - 自定义自动锁定时间 (分钟)。
     - 是否在启动时自动锁定。
+    - 是否在启动时自动锁定。
     - 是否模糊背景内容 (即将推出)。
-
-## 🚀 安装 (Installation)
+- **🎥 智能媒体检测**:
+    - **全平台支持**: 完美支持 **Media Extended** 插件 (Bilibili/YouTube)。
+    - **内嵌视频**: 自动检测笔记中的 `<iframe>`, `<video>`, `<audio>` 以及嵌套的 `Webview`。
+    - **底层音频监控**: 使用 Electron 底层 API 监听全局音频，即使跨域视频也能精准识别，防止在观看视频时意外锁屏。
+    - **调试工具**: 提供 `Liquid Lock: Debug Media State` 命令排查播放状态。
 
 1.  下载本项目源码。
 2.  在项目根目录运行命令安装依赖：
@@ -43,6 +47,8 @@ Obsidian 的液态玻璃拟态锁屏插件。
 4.  **手动解锁**: 点击屏幕上的数字键盘或直接使用键盘输入 PIN 码。
     - `Backspace` / `Delete`: 删除一位。
     - 输入满 4 位自动验证。
+## 效果图
+<img width="1920" height="1046" alt="image" src="https://github.com/user-attachments/assets/4a55fc49-6c6b-4cae-a2db-3d8625ab12a9" />
 
 ## 🤝 贡献 (Contributing)
 
